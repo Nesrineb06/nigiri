@@ -100,11 +100,14 @@ void query_engine<UseLowerBounds>::execute(unixtime_t const start_time,
                                            profile_idx_t const,
                                            pareto_set<journey>& results) {
   tb_queue_dbg("--- EXECUTE START_TIME={}", start_time);
+  auto const collect_all_segments = state_.collect_all_segments_;
 
-  for (auto k = 0U; k != kMaxTransfers; ++k) {
-    if (state_.t_min_[k] >= worst_time_at_dest) {
-      state_.t_min_[k] = worst_time_at_dest;
-      state_.parent_[k] = queue_entry::kNoParent;
+  if (!collect_all_segments) {
+    for (auto k = 0U; k != kMaxTransfers; ++k) {
+      if (state_.t_min_[k] >= worst_time_at_dest) {
+        state_.t_min_[k] = worst_time_at_dest;
+        state_.parent_[k] = queue_entry::kNoParent;
+      }
     }
   }
 
@@ -127,13 +130,15 @@ void query_engine<UseLowerBounds>::execute(unixtime_t const start_time,
     tb_debug("next round: {}", round);
   }
 
-  for (auto n = 0U; n != kMaxTransfers; ++n) {
-    if (state_.parent_[n] != queue_entry::kNoParent) {
-      results.add({.legs_ = {},
-                   .start_time_ = start_time,
-                   .dest_time_ = state_.t_min_[n],
-                   .dest_ = location_idx_t::invalid(),
-                   .transfers_ = static_cast<std::uint8_t>(n)});
+  if (!collect_all_segments) {
+    for (auto n = 0U; n != kMaxTransfers; ++n) {
+      if (state_.parent_[n] != queue_entry::kNoParent) {
+        results.add({.legs_ = {},
+                     .start_time_ = start_time,
+                     .dest_time_ = state_.t_min_[n],
+                     .dest_ = location_idx_t::invalid(),
+                     .transfers_ = static_cast<std::uint8_t>(n)});
+      }
     }
   }
 
@@ -146,7 +151,23 @@ template <bool UseLowerBounds>
 void query_engine<UseLowerBounds>::seg_dest(std::uint8_t const k,
                                             queue_idx_t const q) {
   auto const& qe = state_.q_n_[q];
+  auto farthest_ibe_segment = segment_idx_t::invalid();
   for (auto const segment : qe.segment_range_) {
+    if (state_.collect_all_segments_) {
+      if (state_.ibe_target_segments_.test(segment) &&
+          (farthest_ibe_segment == segment_idx_t::invalid() ||
+           farthest_ibe_segment < segment)) {
+        farthest_ibe_segment = segment;
+      }
+      continue;
+    }
+
+    auto const t = state_.tbd_.segment_transports_[segment];
+    auto const i = static_cast<stop_idx_t>(
+        to_idx(segment - state_.tbd_.transport_first_segment_[t] + 1));
+    auto const day = base_ + qe.transport_query_day_offset_;
+    auto const arr_time = tt_.event_time({t, day}, i, event_type::kArr);
+
     if (!state_.end_reachable_.test(segment)) {
       tb_debug("[k={}] reached segment {}  => dest not reachable", k,
                seg(segment, qe));
@@ -155,11 +176,6 @@ void query_engine<UseLowerBounds>::seg_dest(std::uint8_t const k,
 
     tb_debug("[k={}] reached segment {}  => dest reachable!", k,
              seg(segment, qe));
-    auto const t = state_.tbd_.segment_transports_[segment];
-    auto const i = static_cast<stop_idx_t>(
-        to_idx(segment - state_.tbd_.transport_first_segment_[t] + 1));
-    auto const arr_time = tt_.event_time(
-        {t, base_ + qe.transport_query_day_offset_}, i, event_type::kArr);
     auto const time_at_dest = arr_time + state_.dist_to_dest_.at(segment);
 
     for (auto j = k; j != state_.t_min_.size(); ++j) {
@@ -171,6 +187,50 @@ void query_engine<UseLowerBounds>::seg_dest(std::uint8_t const k,
       }
     }
   }
+  if (state_.collect_all_segments_ &&
+      farthest_ibe_segment != segment_idx_t::invalid()) {
+    mark_path_to_segment(k, q, farthest_ibe_segment);
+  }
+}
+
+template <bool UseLowerBounds>
+void query_engine<UseLowerBounds>::mark_path_to_segment(
+    std::uint8_t const k,
+    queue_idx_t const q,
+    segment_idx_t const target_segment) {
+  auto mark_segment = [&](segment_idx_t const s, std::uint8_t const level) {
+    auto& marker = state_.segment_level_markers_[cista::to_idx(s)];
+    marker = std::min(marker, level);
+  };
+
+  auto child_q = q;
+  auto current_level = k;
+  auto const mark_until = [&](queue_entry const& qe,
+                              segment_idx_t const last,
+                              std::uint8_t const level) {
+    utl::verify(qe.segment_range_.contains(last),
+                "mark_until: last segment outside queue-entry range");
+    auto s = qe.segment_range_.from_;
+    while (s <= last) {
+      mark_segment(s, level);
+      ++s;
+    }
+  };
+
+  mark_until(state_.q_n_[q], target_segment, current_level);
+
+  while (state_.q_n_[child_q].parent_ != queue_entry::kNoParent &&
+         current_level > 0U) {
+    auto const parent_q = state_.q_n_[child_q].parent_;
+    auto const& parent_qe = state_.q_n_[parent_q];
+    auto const arrival_segment = state_.q_n_[child_q].parent_arrival_segment_;
+    utl::verify(arrival_segment != segment_idx_t::invalid(),
+                "missing parent arrival segment");
+
+    --current_level;
+    mark_until(parent_qe, arrival_segment, current_level);
+    child_q = parent_q;
+  }
 }
 
 template <bool UseLowerBounds>
@@ -180,8 +240,17 @@ void query_engine<UseLowerBounds>::seg_prune(std::uint8_t const k,
   auto const t = state_.tbd_.segment_transports_[segment];
   auto const i = static_cast<stop_idx_t>(
       to_idx(segment - state_.tbd_.transport_first_segment_[t] + 1));
-  auto arr_time = tt_.event_time({t, base_ + qe.transport_query_day_offset_}, i,
+  auto arr_time = tt_.event_time({t, base_ + qe.transport_query_day_offset_}, i, 
                                  event_type::kArr);
+  if (state_.collect_all_segments_) {
+    if (state_.max_arrival_for_event_to_all_ != unixtime_t::max() &&
+        arr_time > state_.max_arrival_for_event_to_all_) {
+      tb_debug("PRUNING event-to-all {}", seg(segment, qe));
+      qe.segment_range_.to_ = qe.segment_range_.from_;
+      ++stats_.n_segments_pruned_;
+    }
+    return;
+  }
   if constexpr (UseLowerBounds) {
     auto const l = stop{tt_.route_location_seq_[tt_.transport_route_[t]][i]}
                        .location_idx();
@@ -198,29 +267,19 @@ template <bool UseLowerBounds>
 void query_engine<UseLowerBounds>::seg_transfers(queue_idx_t const q,
                                                  std::uint8_t const k) {
   auto const qe = state_.q_n_[q];
-
-  auto const from =
-      state_.tbd_.segment_transfers_[qe.segment_range_.from_].begin();
-  auto const to = state_.tbd_.segment_transfers_[qe.segment_range_.to_].begin();
-  for (auto it = from; it != to; ++it) {
+  auto const day = to_idx(base_ + qe.transport_query_day_offset_);
+  for (auto const s : qe.segment_range_) {
+    auto const& transfers = state_.tbd_.segment_transfers_[s];
+    for (std::size_t i = 0U; i < transfers.size(); ++i) {
 #ifndef _MSC_VER
-    if (it + 4 < to) {
-      __builtin_prefetch(&*(it + 4));
-    }
+      if (i + 4U < transfers.size()) {
+        __builtin_prefetch(&transfers[i + 4U]);
+      }
 #endif
-
-    auto const& transfer = *it;
-
-    tb_debug("[k={}] handling queue entry {}: #transfers={}", k, seg(s, qe),
-             state_.tbd_.segment_transfers_[s].size());
-    auto const day = to_idx(base_ + qe.transport_query_day_offset_);
-    if (state_.tbd_.bitfields_[transfer.traffic_days_].test(day)) {
-      tb_debug("  -> enqueue transfer to {}", seg(transfer.to_segment_, qe));
-      state_.q_n_.enqueue(transfer, q, k + 1, stats_.max_pareto_set_size_);
-    } else {
-      tb_debug("  transfer {} - {} not active on {}", seg(s, qe),
-               seg(transfer.to_segment_, day_idx_t{day}),
-               tt_.to_unixtime(day_idx_t{day}));
+      auto const& transfer = transfers[i];
+      if (state_.tbd_.bitfields_[transfer.traffic_days_].test(day)) {
+        state_.q_n_.enqueue(transfer, s, q, k + 1, stats_.max_pareto_set_size_);
+      }
     }
   }
 }
@@ -258,6 +317,37 @@ void query_engine<UseLowerBounds>::add_start(location_idx_t const l,
           stats_.max_pareto_set_size_);
     }
   }
+}
+
+template <bool UseLowerBounds>
+bool query_engine<UseLowerBounds>::add_start_event(transport_idx_t const t,
+                                                   stop_idx_t const i,
+                                                   day_idx_t const day) {
+  auto const r = tt_.transport_route_[t];
+  auto const stop_seq = tt_.route_location_seq_[r];
+  if (stop_seq.size() < 2U || i >= stop_seq.size() - 1U) {
+    return false;
+  }
+  auto const stp = stop{stop_seq[i]};
+  if (!stp.in_allowed()) {
+    return false;
+  }
+  if (!tt_.bitfields_[tt_.transport_traffic_days_[t]].test(to_idx(day))) {
+    return false;
+  }
+
+  auto const query_day_offset =
+      static_cast<std::int32_t>(to_idx(day)) - static_cast<std::int32_t>(to_idx(base_));
+  if (query_day_offset < 0 || query_day_offset >= kTBMaxDayOffset) {
+    return false;
+  }
+
+  auto const transport_first_segment = state_.tbd_.transport_first_segment_[t];
+  state_.q_n_.initial_enqueue(
+      state_.tbd_, transport_first_segment, transport_first_segment + i, r, t,
+      static_cast<query_day_offset_t>(query_day_offset), day,
+      stats_.max_pareto_set_size_);
+  return true;
 }
 
 template <bool UseLowerBounds>

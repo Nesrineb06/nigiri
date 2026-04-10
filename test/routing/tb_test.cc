@@ -212,6 +212,43 @@ TEST(tb_query, same_day_transfer) {
             results_str(results, tt));
 }
 
+TEST(tb_query, event_to_all_marks_path_levels) {
+  auto const tt = load_gtfs(same_day_transfer_files);
+  auto const tbd = tb::preprocess(tt, profile_idx_t{0});
+  auto const start_time = unixtime_t{sys_days{March / 1 / 2021} + 0h};
+  auto const [day, _] = tt.day_idx_mam(start_time);
+
+  auto algo_state = tb::query_state{tt, tbd};
+  algo_state.collect_all_segments_ = true;
+
+  bitvec is_dest;
+  std::array<bitvec, kMaxVias> is_via{};
+  std::vector<std::uint16_t> dist_to_dest;
+  hash_map<location_idx_t, std::vector<td_offset>> td_dest;
+  std::vector<std::uint16_t> lb;
+  std::vector<via_stop> via;
+
+  auto engine = tb::query_engine<false>{
+      tt, nullptr, algo_state, is_dest, is_via, dist_to_dest, td_dest, lb, via,
+      day, all_clasz_allowed(), false, false, false, transfer_time_settings{}};
+  engine.set_collect_all_segments(true);
+  engine.set_ibe_target_segment(
+      tbd.transport_first_segment_[transport_idx_t{1U}]);  // S1->S2 on R1
+
+  ASSERT_TRUE(engine.add_start_event(transport_idx_t{0U}, stop_idx_t{0U}, day));
+
+  pareto_set<journey> results;
+  engine.execute(start_time, kMaxTransfers, unixtime_t::max(), profile_idx_t{0},
+                 results);
+
+  EXPECT_TRUE(results.empty());
+  auto const& markers = engine.segment_level_markers();
+  auto const r0_seg = tbd.transport_first_segment_[transport_idx_t{0U}];
+  auto const r1_seg = tbd.transport_first_segment_[transport_idx_t{1U}];
+  EXPECT_EQ(0U, markers[cista::to_idx(r0_seg)]);  // first leg
+  EXPECT_EQ(1U, markers[cista::to_idx(r1_seg)]);  // transfer leg to target
+}
+
 mem_dir next_day_transfer_files() {
   return mem_dir::read(R"(
 # agency.txt
@@ -776,6 +813,122 @@ TEST(tb_query, early_train) {
   auto const results = tripbased_search(
       tt, tbd, "S1", "S3", unixtime_t{sys_days{March / 04 / 2021} + 5h});
   EXPECT_EQ(std::string_view{early_train_journeys}, results_str(results, tt));
+}
+
+mem_dir complex_long_query_files() {
+  return mem_dir::read(R"(
+# agency.txt
+agency_id,agency_name,agency_url,agency_timezone
+DTA,Demo Transit Authority,,Europe/London
+
+# stops.txt
+stop_id,stop_name,stop_desc,stop_lat,stop_lon,stop_url,location_type,parent_station
+A,A,,,,,,
+B,B,,,,,,
+C,C,,,,,,
+D,D,,,,,,
+E,E,,,,,,
+F,F,,,,,,
+G,G,,,,,,
+
+# calendar.txt
+service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date
+MON,1,0,0,0,0,0,0,20210301,20210307
+
+# routes.txt
+route_id,agency_id,route_short_name,route_long_name,route_desc,route_type
+R0,DTA,R0,R0,"A -> B -> C",2
+R1,DTA,R1,R1,"C -> D -> E",2
+R2,DTA,R2,R2,"E -> G",2
+R3,DTA,R3,R3,"B -> F -> G",2
+R4,DTA,R4,R4,"A -> D -> G",2
+
+# trips.txt
+route_id,service_id,trip_id,trip_headsign,block_id
+R0,MON,R0_MON_A_C,R0_MON_A_C,10
+R1,MON,R1_MON_C_E,R1_MON_C_E,11
+R2,MON,R2_MON_E_G,R2_MON_E_G,12
+R3,MON,R3_MON_B_G,R3_MON_B_G,13
+R4,MON,R4_MON_A_G,R4_MON_A_G,14
+
+# stop_times.txt
+trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type
+R0_MON_A_C,05:00:00,05:00:00,A,0,0,0
+R0_MON_A_C,06:00:00,06:00:00,B,1,0,0
+R0_MON_A_C,07:00:00,07:00:00,C,2,0,0
+R1_MON_C_E,07:10:00,07:10:00,C,0,0,0
+R1_MON_C_E,07:40:00,07:40:00,D,1,0,0
+R1_MON_C_E,08:10:00,08:10:00,E,2,0,0
+R2_MON_E_G,08:20:00,08:20:00,E,0,0,0
+R2_MON_E_G,09:00:00,09:00:00,G,1,0,0
+R3_MON_B_G,06:10:00,06:10:00,B,0,0,0
+R3_MON_B_G,08:00:00,08:00:00,F,1,0,0
+R3_MON_B_G,09:30:00,09:30:00,G,2,0,0
+R4_MON_A_G,05:30:00,05:30:00,A,0,0,0
+R4_MON_A_G,08:00:00,08:00:00,D,1,0,0
+R4_MON_A_G,10:30:00,10:30:00,G,2,0,0
+)");
+}
+
+TEST(tb_query, event_to_all_complex_long_multi_path) {
+  auto const tt = load_gtfs(complex_long_query_files);
+  auto const tbd = tb::preprocess(tt, profile_idx_t{0});
+
+  // Start exactly on R0 at A on 2021-03-01 05:00.
+  auto const start_time = unixtime_t{sys_days{March / 1 / 2021} + 5h};
+  auto const [day, _] = tt.day_idx_mam(start_time);
+  auto algo_state = tb::query_state{tt, tbd};
+
+  bitvec is_dest;
+  std::array<bitvec, kMaxVias> is_via{};
+  std::vector<std::uint16_t> dist_to_dest;
+  hash_map<location_idx_t, std::vector<td_offset>> td_dest;
+  std::vector<std::uint16_t> lb;
+  std::vector<via_stop> via;
+
+  auto engine = tb::query_engine<false>{
+      tt, nullptr, algo_state, is_dest, is_via, dist_to_dest, td_dest, lb, via,
+      day, all_clasz_allowed(), false, false, false, transfer_time_settings{}};
+
+  engine.set_collect_all_segments(true);
+  // Two synthetic IBE targets:
+  // - R3: F->G (reachable with one transfer from R0)
+  // - R2: E->G (reachable with two transfers via R1)
+  auto const r3_to_g =
+      tbd.transport_first_segment_[transport_idx_t{3U}] +
+      tb::segment_idx_t{1U};
+  auto const r2_to_g = tbd.transport_first_segment_[transport_idx_t{2U}];
+  engine.set_ibe_target_segment(r3_to_g);
+  engine.set_ibe_target_segment(r2_to_g);
+
+  // Start on transport 0 (= R0_MON_A_C), stop 0 (= A), on this day.
+  ASSERT_TRUE(engine.add_start_event(transport_idx_t{0U}, stop_idx_t{0U}, day));
+
+  pareto_set<journey> results;
+  engine.execute(start_time, kMaxTransfers, unixtime_t::max(), profile_idx_t{0},
+                 results);
+
+  auto const& markers = engine.segment_level_markers();
+  EXPECT_TRUE(results.empty());
+
+  auto const r0_seg0 = tbd.transport_first_segment_[transport_idx_t{0U}];
+  auto const r0_seg1 = r0_seg0 + tb::segment_idx_t{1U};
+  auto const r1_seg0 = tbd.transport_first_segment_[transport_idx_t{1U}];
+  auto const r1_seg1 = r1_seg0 + tb::segment_idx_t{1U};
+  auto const r2_seg0 = tbd.transport_first_segment_[transport_idx_t{2U}];
+  auto const r3_seg0 = tbd.transport_first_segment_[transport_idx_t{3U}];
+  auto const r3_seg1 = r3_seg0 + tb::segment_idx_t{1U};
+
+  // Path to R3 target should mark R0@k0 and R3@k1.
+  EXPECT_EQ(0U, markers[cista::to_idx(r0_seg0)]);
+  EXPECT_EQ(1U, markers[cista::to_idx(r3_seg0)]);
+  EXPECT_EQ(1U, markers[cista::to_idx(r3_seg1)]);
+
+  // Path to R2 target should mark deeper transfer chain at k2.
+  EXPECT_EQ(0U, markers[cista::to_idx(r0_seg1)]);
+  EXPECT_EQ(1U, markers[cista::to_idx(r1_seg0)]);
+  EXPECT_EQ(1U, markers[cista::to_idx(r1_seg1)]);
+  EXPECT_EQ(2U, markers[cista::to_idx(r2_seg0)]);
 }
 
 constexpr auto const abc_journeys = R"(

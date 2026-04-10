@@ -4,6 +4,8 @@
 
 #include "fmt/ranges.h"
 
+#include "utl/verify.h"
+
 #include "nigiri/routing/tb/reached.h"
 #include "nigiri/routing/tb/segment_info.h"
 #include "nigiri/routing/tb/settings.h"
@@ -27,6 +29,7 @@ struct queue_entry {
   static_assert(1 << kQueryDayOffsetBits >= kTBMaxDayOffset);
 
   interval<segment_idx_t> segment_range_;
+  segment_idx_t parent_arrival_segment_;
   queue_idx_t parent_ : 27;
   queue_idx_t transport_query_day_offset_ : kQueryDayOffsetBits;
 };
@@ -38,9 +41,17 @@ struct queue {
   void reset() { q_.clear(); }
 
   bool enqueue(transfer const& transfer,
+               segment_idx_t const parent_arrival_segment,
                queue_idx_t const parent,
                std::uint8_t const k,
                std::uint64_t& max_pareto_set_size) {
+    utl::verify(parent != queue_entry::kNoParent,
+                "tb enqueue: invalid parent for transfer enqueue");
+    utl::verify(parent_arrival_segment != segment_idx_t::invalid(),
+                "tb enqueue: missing parent arrival segment");
+    utl::verify(q_[parent].segment_range_.contains(parent_arrival_segment),
+                "tb enqueue: parent arrival segment not in parent range");
+
     auto const day_offset =
         q_[parent].transport_query_day_offset_ + transfer.get_day_offset();
 
@@ -67,6 +78,7 @@ struct queue {
         .segment_range_ = {transfer.to_segment_,
                            transfer.to_segment_ - transfer.to_segment_offset_ +
                                min_segment_offset},
+        .parent_arrival_segment_ = parent_arrival_segment,
         .parent_ = parent,
         .transport_query_day_offset_ = static_cast<queue_idx_t>(day_offset)});
     r_.update(transfer.route_, transfer.transport_offset_,
@@ -105,6 +117,7 @@ struct queue {
     q_.push_back(queue_entry{
         .segment_range_ = {segment,
                            transport_first_segment + min_segment_offset},
+        .parent_arrival_segment_ = segment_idx_t::invalid(),
         .parent_ = queue_entry::kNoParent,
         .transport_query_day_offset_ = query_day_offset});
     r_.update(r, transport_offset, segment_offset, query_day_offset, 0,
