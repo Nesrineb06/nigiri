@@ -65,8 +65,9 @@ struct tb_data {
   profile_idx_t prf_idx_;
   vector_map<transport_idx_t, segment_idx_t> transport_first_segment_;
   vecvec<segment_idx_t, transfer> segment_transfers_;
+  vecvec<segment_idx_t, std::uint8_t> transfer_rank_;  // r(t)
   vector_map<segment_idx_t, transport_idx_t> segment_transports_;
   vector_map<tb_bitfield_idx_t, bitfield> bitfields_;
 };
 
-}  // namespace nigiri::routing::tb
+}
