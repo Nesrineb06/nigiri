@@ -592,7 +592,12 @@ tb_data preprocess(timetable const& tt, profile_idx_t const prf_idx) {
       },
       pt->update_fn());
 
+  for (auto s = segment_idx_t{0U}; s != d.segment_transfers_.size(); ++s) {
+    d.transfer_rank_.emplace_back(
+        std::vector<std::uint8_t>(d.segment_transfers_[s].size(), 0U));
+  }
+
   return d;
 }
 
-}  // namespace nigiri::routing::tb
+}
