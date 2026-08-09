@@ -70,4 +70,4 @@ struct tb_data {
   vector_map<tb_bitfield_idx_t, bitfield> bitfields_;
 };
 
-}
+}  // namespace nigiri::routing::tb

@@ -600,4 +600,4 @@ tb_data preprocess(timetable const& tt, profile_idx_t const prf_idx) {
   return d;
 }
 
-}
+} // namespace nigiri::routing::tb
