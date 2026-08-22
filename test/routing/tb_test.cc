@@ -7,6 +7,13 @@
 #include "nigiri/routing/search.h"
 #include "nigiri/routing/tb/preprocess.h"
 #include "nigiri/routing/tb/query_engine.h"
+#include "nigiri/routing/tb/trex/bitfield_interner.h"
+#include "nigiri/routing/tb/trex/bitfield_queue.h"
+#include "nigiri/routing/tb/trex/bitfield_reached.h"
+#include "nigiri/routing/tb/trex/customize.h"
+#include "nigiri/routing/tb/trex/scan.h"
+#include "nigiri/routing/tb/trex/trex_ibe.h"
+#include "nigiri/routing/tb/trex/trex_partition.h"
 
 #include "../loader/hrd/hrd_timetable.h"
 
@@ -185,6 +192,252 @@ TEST(tb_preprocess, same_day_transfer) {
   // EXPECT_EQ(0, t.day_offset_);
 }
 
+// Positive case: a boundary-crossing transfer must get a rank above 0.
+TEST(tb_customize, sets_rank_for_crossing_transfer) {
+  auto tt = load_gtfs(same_day_transfer_files);
+  auto tbd = tb::preprocess(tt, profile_idx_t{0});
+  auto const from_segment = tbd.transport_first_segment_[transport_idx_t{0U}];
+
+  auto const src = source_idx_t{0};
+  auto const s0 = tt.locations_.location_id_to_idx_.at({"S0", src});
+  auto const s1 = tt.locations_.location_id_to_idx_.at({"S1", src});
+  auto const s2 = tt.locations_.location_id_to_idx_.at({"S2", src});
+
+  // s0 != s1 makes R0's hop an IBE; s1 != s2 makes the search leave the cell.
+  auto cell_ids = vector_map<location_idx_t, std::uint64_t>(
+      tt.n_locations(), std::uint64_t{0U});
+  cell_ids[s0] = 1U;
+  cell_ids[s1] = 2U;
+  cell_ids[s2] = 3U;
+  auto const partition = tb::trex_partition{1, std::move(cell_ids)};
+
+  ASSERT_EQ(0U, tbd.transfer_rank_[from_segment][0]);
+
+  tb::customize(tt, tbd, partition);
+
+  EXPECT_GE(tbd.transfer_rank_[from_segment][0], 1U);
+}
+
+// Negative case: a transfer inside one cell must keep rank 0.
+TEST(tb_customize, keeps_rank_zero_for_transfer_within_cell) {
+  auto tt = load_gtfs(same_day_transfer_files);
+  auto tbd = tb::preprocess(tt, profile_idx_t{0});
+  auto const from_segment = tbd.transport_first_segment_[transport_idx_t{0U}];
+
+  auto const src = source_idx_t{0};
+  auto const s0 = tt.locations_.location_id_to_idx_.at({"S0", src});
+  auto const s1 = tt.locations_.location_id_to_idx_.at({"S1", src});
+  auto const s2 = tt.locations_.location_id_to_idx_.at({"S2", src});
+
+  // All stops share one cell, so R0's hop is never an IBE.
+  auto cell_ids = vector_map<location_idx_t, std::uint64_t>(
+      tt.n_locations(), std::uint64_t{0U});
+  cell_ids[s0] = 1U;
+  cell_ids[s1] = 1U;
+  cell_ids[s2] = 1U;
+  auto const partition = tb::trex_partition{1, std::move(cell_ids)};
+
+  ASSERT_EQ(0U, tbd.transfer_rank_[from_segment][0]);
+
+  tb::customize(tt, tbd, partition);
+
+  EXPECT_EQ(0U, tbd.transfer_rank_[from_segment][0]);
+}
+
+// A rank must stop rising once its crossing merges away at a coarser level.
+TEST(tb_customize, stops_rank_rise_when_crossing_merged_at_higher_level) {
+  auto tt = load_gtfs(same_day_transfer_files);
+  auto tbd = tb::preprocess(tt, profile_idx_t{0});
+  auto const from_segment = tbd.transport_first_segment_[transport_idx_t{0U}];
+
+  auto const src = source_idx_t{0};
+  auto const s0 = tt.locations_.location_id_to_idx_.at({"S0", src});
+  auto const s1 = tt.locations_.location_id_to_idx_.at({"S1", src});
+  auto const s2 = tt.locations_.location_id_to_idx_.at({"S2", src});
+
+  // Level 0: cells 0/1/3 all differ. Level 1 (>>1): 0/0/1, so s0 and s1 merge.
+  auto cell_ids = vector_map<location_idx_t, std::uint64_t>(
+      tt.n_locations(), std::uint64_t{0U});
+  cell_ids[s0] = 0U;
+  cell_ids[s1] = 1U;
+  cell_ids[s2] = 3U;
+  auto const partition = tb::trex_partition{2, std::move(cell_ids)};
+
+  ASSERT_EQ(0U, tbd.transfer_rank_[from_segment][0]);
+
+  tb::customize(tt, tbd, partition);
+
+  EXPECT_EQ(1U, tbd.transfer_rank_[from_segment][0]);
+}
+
+// Cells 0/2/4 stay distinct after >>1, so the rank climbs level by level to 2.
+TEST(tb_customize, raises_rank_to_two_when_crossing_survives_higher_level) {
+  auto tt = load_gtfs(same_day_transfer_files);
+  auto tbd = tb::preprocess(tt, profile_idx_t{0});
+  auto const from_segment = tbd.transport_first_segment_[transport_idx_t{0U}];
+
+  auto const src = source_idx_t{0};
+  auto const s0 = tt.locations_.location_id_to_idx_.at({"S0", src});
+  auto const s1 = tt.locations_.location_id_to_idx_.at({"S1", src});
+  auto const s2 = tt.locations_.location_id_to_idx_.at({"S2", src});
+
+  auto cell_ids = vector_map<location_idx_t, std::uint64_t>(
+      tt.n_locations(), std::uint64_t{0U});
+  cell_ids[s0] = 0U;
+  cell_ids[s1] = 2U;
+  cell_ids[s2] = 4U;
+  auto const partition = tb::trex_partition{2, std::move(cell_ids)};
+
+  ASSERT_EQ(0U, tbd.transfer_rank_[from_segment][0]);
+
+  tb::customize(tt, tbd, partition);
+
+  EXPECT_EQ(2U, tbd.transfer_rank_[from_segment][0]);
+}
+
+mem_dir two_independent_transfers_files() {
+  return mem_dir::read(R"(
+# agency.txt
+agency_id,agency_name,agency_url,agency_timezone
+DTA,Demo Transit Authority,,Europe/London
+
+# stops.txt
+stop_id,stop_name,stop_desc,stop_lat,stop_lon,stop_url,location_type,parent_station
+S0,S0,,,,,,
+S1,S1,,,,,,
+S2,S2,,,,,,
+P0,P0,,,,,,
+P1,P1,,,,,,
+P2,P2,,,,,,
+
+# calendar.txt
+service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date
+MON,1,0,0,0,0,0,0,20210301,20210307
+
+# routes.txt
+route_id,agency_id,route_short_name,route_long_name,route_desc,route_type
+R0,DTA,R0,R0,"S0 -> S1",2
+R1,DTA,R1,R1,"S1 -> S2",2
+R2,DTA,R2,R2,"P0 -> P1",2
+R3,DTA,R3,R3,"P1 -> P2",2
+
+# trips.txt
+route_id,service_id,trip_id,trip_headsign,block_id
+R0,MON,R0_MON,R0_MON,1
+R1,MON,R1_MON,R1_MON,2
+R2,MON,R2_MON,R2_MON,3
+R3,MON,R3_MON,R3_MON,4
+
+# stop_times.txt
+trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type
+R0_MON,00:00:00,00:00:00,S0,0,0,0
+R0_MON,06:00:00,06:00:00,S1,1,0,0
+R1_MON,12:00:00,12:00:00,S1,0,0,0
+R1_MON,13:00:00,13:00:00,S2,1,0,0
+R2_MON,00:00:00,00:00:00,P0,0,0,0
+R2_MON,06:00:00,06:00:00,P1,1,0,0
+R3_MON,12:00:00,12:00:00,P1,0,0,0
+R3_MON,13:00:00,13:00:00,P2,1,0,0
+)");
+}
+
+// Two independent transfers sharing no stops or routes must both get ranked.
+TEST(tb_customize, ranks_multiple_independent_ibes_correctly) {
+  auto tt = load_gtfs(two_independent_transfers_files);
+  auto tbd = tb::preprocess(tt, profile_idx_t{0});
+  auto const from_segment_s = tbd.transport_first_segment_[transport_idx_t{0U}];
+  auto const from_segment_p = tbd.transport_first_segment_[transport_idx_t{2U}];
+
+  auto const src = source_idx_t{0};
+  auto const s0 = tt.locations_.location_id_to_idx_.at({"S0", src});
+  auto const s1 = tt.locations_.location_id_to_idx_.at({"S1", src});
+  auto const s2 = tt.locations_.location_id_to_idx_.at({"S2", src});
+  auto const p0 = tt.locations_.location_id_to_idx_.at({"P0", src});
+  auto const p1 = tt.locations_.location_id_to_idx_.at({"P1", src});
+  auto const p2 = tt.locations_.location_id_to_idx_.at({"P2", src});
+
+  auto cell_ids = vector_map<location_idx_t, std::uint64_t>(
+      tt.n_locations(), std::uint64_t{0U});
+  cell_ids[s0] = 1U;
+  cell_ids[s1] = 2U;
+  cell_ids[s2] = 3U;
+  cell_ids[p0] = 4U;
+  cell_ids[p1] = 5U;
+  cell_ids[p2] = 6U;
+  auto const partition = tb::trex_partition{1, std::move(cell_ids)};
+
+  ASSERT_EQ(0U, tbd.transfer_rank_[from_segment_s][0]);
+  ASSERT_EQ(0U, tbd.transfer_rank_[from_segment_p][0]);
+
+  tb::customize(tt, tbd, partition);
+
+  EXPECT_GE(tbd.transfer_rank_[from_segment_s][0], 1U);
+  EXPECT_GE(tbd.transfer_rank_[from_segment_p][0], 1U);
+}
+
+// A/B invariant: the same query must return the same result after customize().
+TEST(tb_customize, does_not_change_routing_result) {
+  auto tt = load_gtfs(same_day_transfer_files);
+  auto tbd = tb::preprocess(tt, profile_idx_t{0});
+
+  auto const departure = unixtime_t{sys_days{February / 28 / 2021} + 23h};
+  auto const result_a = tripbased_search(tt, tbd, "S0", "S2", departure);
+
+  auto const src = source_idx_t{0};
+  auto const s0 = tt.locations_.location_id_to_idx_.at({"S0", src});
+  auto const s1 = tt.locations_.location_id_to_idx_.at({"S1", src});
+  auto const s2 = tt.locations_.location_id_to_idx_.at({"S2", src});
+
+  auto cell_ids = vector_map<location_idx_t, std::uint64_t>(
+      tt.n_locations(), std::uint64_t{0U});
+  cell_ids[s0] = 1U;
+  cell_ids[s1] = 2U;
+  cell_ids[s2] = 3U;
+  auto const partition = tb::trex_partition{1, std::move(cell_ids)};
+
+  tb::customize(tt, tbd, partition);
+
+  auto const result_b = tripbased_search(tt, tbd, "S0", "S2", departure);
+
+  EXPECT_EQ(results_str(result_a, tt), results_str(result_b, tt));
+}
+
+// Same A/B invariant, on a fixture where customize() ranks two transfers.
+TEST(tb_customize, does_not_change_routing_result_with_multiple_ibes) {
+  auto tt = load_gtfs(two_independent_transfers_files);
+  auto tbd = tb::preprocess(tt, profile_idx_t{0});
+
+  auto const departure = unixtime_t{sys_days{February / 28 / 2021} + 23h};
+  auto const result_a_s = tripbased_search(tt, tbd, "S0", "S2", departure);
+  auto const result_a_p = tripbased_search(tt, tbd, "P0", "P2", departure);
+
+  auto const src = source_idx_t{0};
+  auto const s0 = tt.locations_.location_id_to_idx_.at({"S0", src});
+  auto const s1 = tt.locations_.location_id_to_idx_.at({"S1", src});
+  auto const s2 = tt.locations_.location_id_to_idx_.at({"S2", src});
+  auto const p0 = tt.locations_.location_id_to_idx_.at({"P0", src});
+  auto const p1 = tt.locations_.location_id_to_idx_.at({"P1", src});
+  auto const p2 = tt.locations_.location_id_to_idx_.at({"P2", src});
+
+  auto cell_ids = vector_map<location_idx_t, std::uint64_t>(
+      tt.n_locations(), std::uint64_t{0U});
+  cell_ids[s0] = 1U;
+  cell_ids[s1] = 2U;
+  cell_ids[s2] = 3U;
+  cell_ids[p0] = 4U;
+  cell_ids[p1] = 5U;
+  cell_ids[p2] = 6U;
+  auto const partition = tb::trex_partition{1, std::move(cell_ids)};
+
+  tb::customize(tt, tbd, partition);
+
+  auto const result_b_s = tripbased_search(tt, tbd, "S0", "S2", departure);
+  auto const result_b_p = tripbased_search(tt, tbd, "P0", "P2", departure);
+
+  EXPECT_EQ(results_str(result_a_s, tt), results_str(result_b_s, tt));
+  EXPECT_EQ(results_str(result_a_p, tt), results_str(result_b_p, tt));
+}
+
 constexpr auto const same_day_transfer_journeys = R"(
 [2021-02-28 23:00, 2021-03-01 13:00]
 TRANSFERS: 1
@@ -258,6 +511,142 @@ TEST(tb_preprocess, next_day_transfer) {
   // EXPECT_EQ(transport_idx_t{1U}, t.to_transport_);
   EXPECT_EQ(bitfield{"100000"}, tbd.bitfields_[t.traffic_days_]);
   // EXPECT_EQ(1, t.day_offset_);
+}
+
+// Nonzero day offset: R0 runs Monday, R1 Tuesday, so the days shift by one.
+TEST(tb_customize, sets_rank_for_next_day_crossing_transfer) {
+  auto tt = load_gtfs(next_day_transfer_files);
+  auto tbd = tb::preprocess(tt, profile_idx_t{0});
+  auto const from_segment = tbd.transport_first_segment_[transport_idx_t{0U}];
+  ASSERT_EQ(1U, tbd.segment_transfers_[from_segment].size());
+
+  auto const src = source_idx_t{0};
+  auto const s0 = tt.locations_.location_id_to_idx_.at({"S0", src});
+  auto const s1 = tt.locations_.location_id_to_idx_.at({"S1", src});
+  auto const s2 = tt.locations_.location_id_to_idx_.at({"S2", src});
+
+  auto cell_ids = vector_map<location_idx_t, std::uint64_t>(
+      tt.n_locations(), std::uint64_t{0U});
+  cell_ids[s0] = 1U;
+  cell_ids[s1] = 2U;
+  cell_ids[s2] = 3U;
+  auto const partition = tb::trex_partition{1, std::move(cell_ids)};
+
+  ASSERT_EQ(0U, tbd.transfer_rank_[from_segment][0]);
+
+  tb::customize(tt, tbd, partition);
+
+  EXPECT_GE(tbd.transfer_rank_[from_segment][0], 1U);
+}
+
+// beta' = (beta & t.beta) << t.sigma: 1100000 & 100000 = 100000, then << 1.
+TEST(tb_bitfield_queue, enqueue_shifts_day_bitfield_by_day_offset) {
+  auto tt = load_gtfs(next_day_transfer_files);
+  auto tbd = tb::preprocess(tt, profile_idx_t{0});
+  auto const from_segment = tbd.transport_first_segment_[transport_idx_t{0U}];
+  ASSERT_EQ(1U, tbd.segment_transfers_[from_segment].size());
+  auto const t = tbd.segment_transfers_[from_segment][0];
+  ASSERT_EQ(1, t.get_day_offset());
+  ASSERT_EQ(bitfield{"100000"}, tbd.bitfields_[t.traffic_days_]);
+
+  auto const to_loc =
+      stop{tt.route_location_seq_[t.route_][t.to_segment_offset_]}
+          .location_idx();
+  auto partition = tb::trex_partition{
+      1, vector_map<location_idx_t, std::uint64_t>(tt.n_locations(),
+                                                   std::uint64_t{0U})};
+  auto const c = partition.get_cell_id_of_stop(to_loc, 0);
+
+  auto reached = tb::bitfield_reached{tt.n_routes()};
+  auto interner = tb::bitfield_interner{tbd};
+  auto q = tb::bitfield_queue{};
+  q.q_.push_back(tb::bitfield_queue_entry{
+      .segment_range_ = {from_segment, from_segment},
+      .day_offset_ = 0,
+      .days_ = interner.get_or_create(bitfield{"1100000"}),
+      .parent_arrival_segment_ = from_segment,
+      .parent_transfer_idx_ = 0U,
+      .parent_ = tb::bitfield_queue_entry::kNoParent});
+
+  auto const ok = q.enqueue(tt, tbd, partition, reached, interner, 0U,
+                           from_segment, 0U, c, 0);
+
+  ASSERT_TRUE(ok);
+  ASSERT_EQ(2U, q.size());
+  EXPECT_EQ(bitfield{"1000000"}, tbd.bitfields_[q[1].days_]);
+  EXPECT_EQ(std::int16_t{1}, q[1].day_offset_);
+}
+
+tb::bitfield_label reached_label(std::int16_t const day_offset,
+                                 std::uint16_t const trip_offset,
+                                 stop_idx_t const stop_idx,
+                                 bitfield const& days) {
+  return tb::bitfield_label{.day_offset_ = day_offset,
+                            .trip_offset_ = trip_offset,
+                            .stop_idx_ = stop_idx,
+                            .days_ = days};
+}
+
+// Partial domination: 1100 and 1010 share one bit, so the candidate keeps 0010.
+TEST(tb_bitfield_reached, shrinks_candidate_to_non_overlapping_days) {
+  auto r = tb::bitfield_reached{1U};
+  auto const route = route_idx_t{0U};
+
+  r.update(route, reached_label(0, 0, stop_idx_t{0U}, bitfield{"1100"}));
+  auto const result =
+      r.update(route, reached_label(0, 0, stop_idx_t{0U}, bitfield{"1010"}));
+
+  EXPECT_EQ(bitfield{"0010"}, result);
+  ASSERT_EQ(2U, r.data_[route].size());
+  EXPECT_EQ(bitfield{"1100"}, r.data_[route][0].days_);
+  EXPECT_EQ(bitfield{"0010"}, r.data_[route][1].days_);
+}
+
+// Both dominated entries must be erased, including the one sliding into place.
+TEST(tb_bitfield_reached, erases_every_fully_dominated_entry) {
+  auto r = tb::bitfield_reached{1U};
+  auto const route = route_idx_t{0U};
+
+  r.update(route, reached_label(1, 1, stop_idx_t{1U}, bitfield{"1100"}));
+  r.update(route, reached_label(2, 2, stop_idx_t{2U}, bitfield{"0011"}));
+  ASSERT_EQ(2U, r.data_[route].size());
+
+  auto const result =
+      r.update(route, reached_label(0, 0, stop_idx_t{0U}, bitfield{"1111"}));
+
+  EXPECT_EQ(bitfield{"1111"}, result);
+  ASSERT_EQ(1U, r.data_[route].size());
+  EXPECT_EQ(bitfield{"1111"}, r.data_[route][0].days_);
+}
+
+// A dominated entry that loses only some days must survive on the rest.
+TEST(tb_bitfield_reached, shrinks_dominated_entry_that_survives) {
+  auto r = tb::bitfield_reached{1U};
+  auto const route = route_idx_t{0U};
+
+  r.update(route, reached_label(1, 1, stop_idx_t{1U}, bitfield{"1100"}));
+  auto const result =
+      r.update(route, reached_label(0, 0, stop_idx_t{0U}, bitfield{"1000"}));
+
+  EXPECT_EQ(bitfield{"1000"}, result);
+  ASSERT_EQ(2U, r.data_[route].size());
+  EXPECT_EQ(bitfield{"0100"}, r.data_[route][0].days_);
+  EXPECT_EQ(bitfield{"1000"}, r.data_[route][1].days_);
+}
+
+// Non-comparable labels must keep all of their days.
+TEST(tb_bitfield_reached, leaves_non_comparable_labels_untouched) {
+  auto r = tb::bitfield_reached{1U};
+  auto const route = route_idx_t{0U};
+
+  r.update(route, reached_label(0, 5, stop_idx_t{0U}, bitfield{"1111"}));
+  auto const result =
+      r.update(route, reached_label(1, 0, stop_idx_t{0U}, bitfield{"1111"}));
+
+  EXPECT_EQ(bitfield{"1111"}, result);
+  ASSERT_EQ(2U, r.data_[route].size());
+  EXPECT_EQ(bitfield{"1111"}, r.data_[route][0].days_);
+  EXPECT_EQ(bitfield{"1111"}, r.data_[route][1].days_);
 }
 
 mem_dir long_transfer_files() {
@@ -604,6 +993,87 @@ TEST(tb_preprocess, uturn_transfer) {
   // EXPECT_EQ(0, t.day_offset_);
 }
 
+// scan() cuts at the first segment leaving the cell; earlier ones stay scannable.
+TEST(tb_scan, truncates_at_first_segment_leaving_the_cell) {
+  auto tt = load_gtfs(uturn_transfer_files);
+  auto tbd = tb::preprocess(tt, profile_idx_t{0});
+  auto const seg0 = tbd.transport_first_segment_[transport_idx_t{0U}];
+  auto const seg1 = seg0 + tb::segment_idx_t{1U};
+
+  auto const src = source_idx_t{0};
+  auto const s1 = tt.locations_.location_id_to_idx_.at({"S1", src});
+  auto const s2 = tt.locations_.location_id_to_idx_.at({"S2", src});
+
+  auto cell_ids = vector_map<location_idx_t, std::uint64_t>(
+      tt.n_locations(), std::uint64_t{0U});
+  cell_ids[s1] = 1U;
+  cell_ids[s2] = 2U;
+  auto const partition = tb::trex_partition{1, std::move(cell_ids)};
+  auto const c = std::uint64_t{1U};
+
+  auto reached = tb::bitfield_reached{tt.n_routes()};
+  auto interner = tb::bitfield_interner{tbd};
+  auto q = tb::bitfield_queue{};
+  q.q_.push_back(tb::bitfield_queue_entry{
+      .segment_range_ = {seg0, seg1 + tb::segment_idx_t{1U}},
+      .day_offset_ = 0,
+      .days_ = interner.get_or_create(bitfield{"100000"}),
+      .parent_arrival_segment_ = seg0,
+      .parent_transfer_idx_ = 0U,
+      .parent_ = tb::bitfield_queue_entry::kNoParent});
+
+  auto marked = std::vector<std::size_t>{};
+  tb::scan(q, 0U, 1U, c, 0, tt, tbd, partition, reached, interner, marked);
+
+  ASSERT_EQ(1U, marked.size());
+  EXPECT_EQ(0U, marked[0]);  // queue index, not segment value
+  EXPECT_EQ(seg0, q[0].segment_range_.from_);
+  EXPECT_EQ(seg1, q[0].segment_range_.to_);
+}
+
+bool interned(tb::tb_data const& tbd, bitfield const& bf) {
+  for (auto const& candidate : tbd.bitfields_) {
+    if (candidate == bf) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// End-to-end: the computed day bitfield must reach tbd.bitfields_ via the interner.
+TEST(tb_customize, computes_expected_day_bitfield_end_to_end) {
+  auto tt = load_gtfs(weekday_transfer_files);
+  auto tbd = tb::preprocess(tt, profile_idx_t{0});
+  auto const from_segment = tbd.transport_first_segment_[transport_idx_t{0U}];
+  ASSERT_EQ(1U, tbd.segment_transfers_[from_segment].size());
+  auto const t = tbd.segment_transfers_[from_segment][0];
+  ASSERT_EQ(1, t.get_day_offset());
+
+  auto const t_of_ibe = tbd.segment_transports_[from_segment];
+  auto const seed_days = tt.bitfields_[tt.transport_traffic_days_[t_of_ibe]];
+  auto const expected =
+      bitfield{(seed_days & tbd.bitfields_[t.traffic_days_]) << 1};
+  ASSERT_FALSE(expected.none());
+
+  auto const src = source_idx_t{0};
+  auto const s0 = tt.locations_.location_id_to_idx_.at({"S0", src});
+  auto const s1 = tt.locations_.location_id_to_idx_.at({"S1", src});
+  auto const s2 = tt.locations_.location_id_to_idx_.at({"S2", src});
+
+  auto cell_ids = vector_map<location_idx_t, std::uint64_t>(
+      tt.n_locations(), std::uint64_t{0U});
+  cell_ids[s0] = 1U;
+  cell_ids[s1] = 2U;
+  cell_ids[s2] = 3U;
+  auto const partition = tb::trex_partition{1, std::move(cell_ids)};
+
+  ASSERT_FALSE(interned(tbd, expected));
+
+  tb::customize(tt, tbd, partition);
+
+  EXPECT_TRUE(interned(tbd, expected));
+}
+
 mem_dir unnecessary_transfer_1_files() {
   return mem_dir::read(R"(
 # agency.txt
@@ -901,3 +1371,4 @@ TEST(tb_query, intermodal_abc) {
   EXPECT_EQ(std::string_view{intermodal_abc_journeys},
             results_str(results, tt));
 }
+

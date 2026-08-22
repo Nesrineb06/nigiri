@@ -3,7 +3,7 @@
 #include <vector>
 
 #include "nigiri/routing/tb/tb_data.h"
-#include "nigiri/routing/tb/trex_partition.h"
+#include "nigiri/routing/tb/trex/trex_partition.h"
 #include "nigiri/types.h"
 
 namespace nigiri {

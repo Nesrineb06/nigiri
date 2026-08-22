@@ -1,28 +1,21 @@
-#pragma once
+#include "nigiri/routing/tb/trex/scan.h"
 
-#include <cstdint>
-#include <vector>
-
-#include "nigiri/routing/tb/bitfield_queue.h"
-#include "nigiri/routing/tb/bitfield_reached.h"
-#include "nigiri/routing/tb/tb_data.h"
-#include "nigiri/routing/tb/trex_partition.h"
 #include "nigiri/timetable.h"
-#include "nigiri/types.h"
 
 namespace nigiri::routing::tb {
 
-// Algorithm 5 (Scan)
-inline std::vector<std::size_t> scan(bitfield_queue& q,
-                                     std::size_t const round_begin,
-                                     std::size_t const round_end,
-                                     std::uint64_t const c,
-                                     int const l,
-                                     timetable const& tt,
-                                     tb_data const& tbd,
-                                     trex_partition const& partition,
-                                     bitfield_reached& reached) {
-  auto marked = std::vector<std::size_t>{};
+void scan(bitfield_queue& q,
+         std::size_t const round_begin,
+         std::size_t const round_end,
+         std::uint64_t const c,
+         int const l,
+         timetable const& tt,
+         tb_data const& tbd,
+         trex_partition const& partition,
+         bitfield_reached& reached,
+         bitfield_interner& interner,
+         std::vector<std::size_t>& marked) {
+  marked.clear();
 
   // True if segment i's arrival stop (p(T[i])) lies in cell c at level l.
   auto const in_cell = [&](segment_idx_t const i) {
@@ -49,18 +42,16 @@ inline std::vector<std::size_t> scan(bitfield_queue& q,
 
   // Relaxes every transfer in range via enqueue()
   for (auto idx = round_begin; idx != round_end; ++idx) {
-    auto& entry = q[idx];
-    for (auto i = entry.segment_range_.from_; i != entry.segment_range_.to_;
-        ++i) {
+    auto const range = q[idx].segment_range_;
+    for (auto i = range.from_; i != range.to_; ++i) {
       auto const n_transfers = tbd.segment_transfers_[i].size();
       for (auto transfer_idx = std::uint32_t{0U}; transfer_idx != n_transfers;
           ++transfer_idx) {
-        q.enqueue(tt, tbd, partition, reached, idx, i, transfer_idx, c, l);
+        q.enqueue(tt, tbd, partition, reached, interner, idx, i, transfer_idx,
+                 c, l);
       }
     }
   }
-
-  return marked;
 }
 
-}
+}  // namespace nigiri::routing::tb
