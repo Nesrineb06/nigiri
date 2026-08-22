@@ -1,4 +1,4 @@
-#include "nigiri/routing/tb/trex_partition.h"
+#include "nigiri/routing/tb/trex/trex_partition.h"
 
 #include <fstream>
 
@@ -9,6 +9,64 @@
 #include "nigiri/timetable.h"
 
 namespace nigiri::routing::tb {
+
+void union_find::clear() noexcept {
+  for (auto& p : parent_) {
+    p = n_;
+  }
+}
+
+std::uint32_t union_find::find(std::uint32_t const i) noexcept {
+  if (parent_[i] >= n_) {
+    return i;
+  } else {
+    parent_[i] = find(parent_[i]);
+    return parent_[i];
+  }
+}
+
+std::uint32_t union_find::operator()(std::uint32_t const i) noexcept {
+  return find(i);
+}
+
+void union_find::unite(std::uint32_t const i, std::uint32_t const j) noexcept {
+  if (find(i) != find(j)) {
+    link(find(i), find(j));
+  }
+}
+
+void union_find::operator()(std::uint32_t const i,
+                            std::uint32_t const j) noexcept {
+  unite(i, j);
+}
+
+void union_find::link(std::uint32_t const i, std::uint32_t const j) noexcept {
+  if (parent_[i] < parent_[j]) {
+    parent_[i] = j;
+  } else if (parent_[j] < parent_[i]) {
+    parent_[j] = i;
+  } else {
+    parent_[i] = j;
+    ++parent_[j];
+  }
+}
+
+union_find make_union_find(std::uint32_t const n) {
+  auto parent = vector<std::uint32_t>{};
+  parent.resize(n, n);
+  return union_find{std::move(parent), n};
+}
+
+std::uint64_t trex_partition::get_cell_id_of_stop(location_idx_t const l,
+                                                   int const level) const {
+  return cell_ids_[l] >> level;
+}
+
+bool trex_partition::in_same_cell(location_idx_t const a,
+                                  location_idx_t const b,
+                                  int const level) const {
+  return get_cell_id_of_stop(a, level) == get_cell_id_of_stop(b, level);
+}
 
 compact_layout_graph create_compact_layout_graph(timetable const& tt) {
   auto const n_locations =

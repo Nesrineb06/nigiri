@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "cista/memory_holder.h"
@@ -18,57 +17,25 @@ namespace nigiri::routing::tb {
 
 // Union-find with union-by-rank + path compression.
 struct union_find {
-  inline void clear() noexcept {
-    for (auto& p : parent_) {
-      p = n_;
-    }
-  }
+  void clear() noexcept;
 
-  inline std::uint32_t find(std::uint32_t const i) noexcept {
-    if (parent_[i] >= n_) {
-      return i;
-    } else {
-      parent_[i] = find(parent_[i]);
-      return parent_[i];
-    }
-  }
+  std::uint32_t find(std::uint32_t i) noexcept;
 
-  inline std::uint32_t operator()(std::uint32_t const i) noexcept {
-    return find(i);
-  }
+  std::uint32_t operator()(std::uint32_t i) noexcept;
 
-  inline void unite(std::uint32_t const i, std::uint32_t const j) noexcept {
-    if (find(i) != find(j)) {
-      link(find(i), find(j));
-    }
-  }
+  void unite(std::uint32_t i, std::uint32_t j) noexcept;
 
-  inline void operator()(std::uint32_t const i, std::uint32_t const j) noexcept {
-    unite(i, j);
-  }
+  void operator()(std::uint32_t i, std::uint32_t j) noexcept;
 
 protected:
-  inline void link(std::uint32_t const i, std::uint32_t const j) noexcept {
-    if (parent_[i] < parent_[j]) {
-      parent_[i] = j;
-    } else if (parent_[j] < parent_[i]) {
-      parent_[j] = i;
-    } else {
-      parent_[i] = j;
-      ++parent_[j];
-    }
-  }
+  void link(std::uint32_t i, std::uint32_t j) noexcept;
 
 public:
   vector<std::uint32_t> parent_;
   std::uint32_t n_{0U};
 };
 
-inline union_find make_union_find(std::uint32_t const n) {
-  auto parent = vector<std::uint32_t>{};
-  parent.resize(n, n);
-  return union_find{std::move(parent), n};
-}
+union_find make_union_find(std::uint32_t n);
 
 struct layout_edge {
   location_idx_t to_vertex_;
@@ -91,23 +58,14 @@ cista::wrapped<compact_layout_graph> read_compact_layout_graph(
 void write_layout_graph_to_metis(compact_layout_graph const& graph,
                                  std::string const& file_name);
 
-
 struct trex_partition {
-  std::uint64_t get_cell_id_of_stop(location_idx_t const l,
-                                    int const level) const {
-    return cell_ids_[l] >> level;
-  }
+  std::uint64_t get_cell_id_of_stop(location_idx_t l, int level) const;
 
-  bool in_same_cell(location_idx_t const a,
-                    location_idx_t const b,
-                    int const level) const {
-    return get_cell_id_of_stop(a, level) == get_cell_id_of_stop(b, level);
-  }
+  bool in_same_cell(location_idx_t a, location_idx_t b, int level) const;
 
   int number_of_levels_{0};
   vector_map<location_idx_t, std::uint64_t> cell_ids_;
 };
-
 
 trex_partition read_partition_file(compact_layout_graph& graph,
                                    std::string const& file_name,
@@ -118,4 +76,4 @@ void write_trex_partition(trex_partition const& partition,
 cista::wrapped<trex_partition> read_trex_partition(
     std::filesystem::path const& path);
 
-}
+}  // namespace nigiri::routing::tb

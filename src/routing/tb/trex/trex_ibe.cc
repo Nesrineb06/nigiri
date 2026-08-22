@@ -1,4 +1,4 @@
-#include "nigiri/routing/tb/trex_ibe.h"
+#include "nigiri/routing/tb/trex/trex_ibe.h"
 
 #include <algorithm>
 
