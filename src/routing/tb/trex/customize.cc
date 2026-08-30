@@ -1,7 +1,10 @@
 #include "nigiri/routing/tb/trex/customize.h"
 
 #include <cstdint>
+#include <limits>
 #include <vector>
+
+#include "utl/verify.h"
 
 #include "nigiri/routing/tb/trex/bitfield_interner.h"
 #include "nigiri/routing/tb/trex/bitfield_queue.h"
@@ -31,6 +34,19 @@ void unpack(bitfield_queue const& q,
 void customize(timetable const& tt,
                tb_data& tbd,
                trex_partition const& partition) {
+  utl::verify(partition.number_of_levels_ > 0 &&
+                  partition.number_of_levels_ <=
+                      std::numeric_limits<std::uint8_t>::max(),
+              "customize: invalid number of levels {}",
+              partition.number_of_levels_);
+  utl::verify(partition.cell_ids_.size() == tt.n_locations(),
+              "customize: partition has {} cell ids, timetable has {} "
+              "locations - partition and timetable do not match",
+              partition.cell_ids_.size(), tt.n_locations());
+
+  tbd.n_levels_ = static_cast<std::uint8_t>(partition.number_of_levels_);
+  tbd.cell_ids_ = partition.cell_ids_;
+
   // r(t)=0 for all t already established by preprocess()'s zero-init of transfer_rank_.
   auto interner = bitfield_interner{tbd};
   auto ibes = collect_all_ibes_on_lowest_level(tt, tbd, partition);
