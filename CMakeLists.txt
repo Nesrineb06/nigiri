@@ -112,6 +112,14 @@ target_compile_features(nigiri PUBLIC cxx_std_23)
 target_compile_options(nigiri PRIVATE ${nigiri-compile-options})
 target_compile_definitions(nigiri PUBLIC PUGIXML_COMPACT=1)
 
+# Without OpenMP the pragmas are ignored and customize() runs single-threaded.
+find_package(OpenMP)
+if (OpenMP_CXX_FOUND)
+  target_link_libraries(nigiri PUBLIC OpenMP::OpenMP_CXX)
+else ()
+  message(WARNING "OpenMP not found - T-REX customize() will run sequentially")
+endif ()
+
 # --- IMPORTER ---
 file(GLOB_RECURSE nigiri-import-files exe/import.cc)
 add_executable(nigiri-import ${nigiri-import-files})
@@ -123,6 +131,12 @@ file(GLOB_RECURSE nigiri-benchmark-files exe/benchmark.cc)
 add_executable(nigiri-benchmark ${nigiri-benchmark-files})
 target_link_libraries(nigiri-benchmark PRIVATE nigiri boost-program_options ianatzdb-res)
 target_compile_features(nigiri-benchmark PUBLIC cxx_std_23)
+
+# --- TREX RANK HISTOGRAM ---
+file(GLOB_RECURSE nigiri-trex-hist-files exe/trex_rank_histogram.cc)
+add_executable(nigiri-trex-hist ${nigiri-trex-hist-files})
+target_link_libraries(nigiri-trex-hist PRIVATE nigiri boost-program_options ianatzdb-res)
+target_compile_features(nigiri-trex-hist PUBLIC cxx_std_23)
 
 # --- QA ---
 file(GLOB_RECURSE nigiri-qa-files exe/qa.cc)

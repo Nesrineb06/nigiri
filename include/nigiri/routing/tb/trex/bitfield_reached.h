@@ -18,6 +18,7 @@ struct bitfield_label {
 
 // Per-route Reached index R
 struct bitfield_reached {
+  bitfield_reached() = default;
   explicit bitfield_reached(std::size_t n_routes);
 
   void reset();
