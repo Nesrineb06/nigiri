@@ -72,7 +72,7 @@ struct query {
   void sanitize(timetable const&);
   bool operator==(query const& o) const;
 
-  start_time_t start_time_;
+  start_time_t start_time_{};
   location_match_mode start_match_mode_{
       nigiri::routing::location_match_mode::kExact};
   location_match_mode dest_match_mode_{
@@ -91,6 +91,7 @@ struct query {
   clasz_mask_t allowed_claszes_{all_clasz_allowed()};
   bool require_bike_transport_{false};
   bool require_car_transport_{false};
+  bool no_compulsory_reservation_{false};
   transfer_time_settings transfer_time_settings_{};
   std::vector<via_stop> via_stops_{};
   std::optional<duration_t> fastest_direct_{};

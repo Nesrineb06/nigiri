@@ -1,14 +1,29 @@
 #include "nigiri/routing/tb/trex/bitfield_reached.h"
 
+#include <limits>
+
 namespace nigiri::routing::tb {
+
+namespace {
+constexpr auto const kNoEntry = std::numeric_limits<std::size_t>::max();
+}
 
 bitfield_reached::bitfield_reached(std::size_t const n_routes)
     : data_{static_cast<std::uint32_t>(n_routes)} {}
 
 void bitfield_reached::reset() {
-  for (auto& v : data_) {
-    v.clear();
+  for (auto const r : touched_) {
+    data_[r].clear();
   }
+  touched_.clear();
+}
+
+std::size_t bitfield_reached::n_entries() const {
+  auto n = std::size_t{0U};
+  for (auto const r : touched_) {
+    n += data_[r].size();
+  }
+  return n;
 }
 
 bitfield bitfield_reached::update(route_idx_t const route,
@@ -18,30 +33,50 @@ bitfield bitfield_reached::update(route_idx_t const route,
   }
 
   auto& entries = data_[route];
+  if (entries.empty()) {
+    // R(route) cannot be empty after update(), so this is the first touch.
+    touched_.push_back(route);
+  }
+  auto same_key = kNoEntry;
+
   for (auto i = std::size_t{0U}; i != entries.size();) {
     auto& other = entries[i];
-    if (other.day_offset_ <= label.day_offset_ &&
-        other.trip_offset_ <= label.trip_offset_ &&
-        other.stop_idx_ <= label.stop_idx_) {
+    if (other.precedes(label) && other.stop_idx_ <= label.stop_idx_) {
+      // Equal keys always land here and are never erased; merge at the end.
+      if (other.day_offset_ == label.day_offset_ &&
+          other.trip_offset_ == label.trip_offset_ &&
+          other.stop_idx_ == label.stop_idx_) {
+        same_key = i;
+        ++same_key_hits_;
+      }
       // existing entry dominates -> shrink the new label's days
-      label.days_ &= ~other.days_;
+      label.days_ &=
+          ~shifted(other.days_, label.day_offset_ - other.day_offset_);
       if (label.days_.none()) {
         return label.days_;  // fully covered: do not insert
       }
-    } else if (label.day_offset_ <= other.day_offset_ &&
-               label.trip_offset_ <= other.trip_offset_ &&
-               label.stop_idx_ <= other.stop_idx_) {
+    } else if (label.precedes(other) && label.stop_idx_ <= other.stop_idx_) {
       // new label dominates -> shrink the existing entry's days
-      other.days_ &= ~label.days_;
+      other.days_ &=
+          ~shifted(label.days_, other.day_offset_ - label.day_offset_);
       if (other.days_.none()) {
         entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(i));
+        if (same_key != kNoEntry && i < same_key) {
+          --same_key;  // the erase shifted the remembered entry left
+        }
         continue;  // next element now at position i, don't advance
       }
     }
     ++i;
   }
 
-  entries.push_back(label);
+  if (same_key != kNoEntry) {
+    // days_ was subtracted above, so the two are disjoint.
+    ++same_key_merges_;
+    entries[same_key].days_ |= label.days_;
+  } else {
+    entries.push_back(label);
+  }
   return label.days_;
 }
 

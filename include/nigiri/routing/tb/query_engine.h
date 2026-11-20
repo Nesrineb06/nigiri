@@ -6,6 +6,7 @@
 #include "nigiri/routing/tb/queue.h"
 #include "nigiri/routing/tb/reached.h"
 #include "nigiri/routing/tb/settings.h"
+#include "nigiri/routing/tb/trex/lcl.h"
 
 namespace nigiri {
 struct timetable;
@@ -29,9 +30,14 @@ struct query_state {
     r_.reset();
     q_n_.reset();
     end_reachable_.zero_out();
+    lcl_.reset(tbd_, trex_);
   }
 
   tb_data const& tbd_;
+
+  // T-REX rank pruning on/off (no-op unless tbd_ was customized); for A/B.
+  bool trex_{true};
+  lcl_filter lcl_;
 
   // avx_reached r_;
   // queue<avx_reached> q_n_{r_};
@@ -54,6 +60,8 @@ struct query_stats {
         {"n_segments_enqueued", n_segments_enqueued_},
         {"n_segments_pruned", n_segments_pruned_},
         {"n_enqueue_prevented_by_reached", n_enqueue_prevented_by_reached_},
+        {"n_transfers_relaxed", n_transfers_relaxed_},
+        {"n_transfers_pruned_by_rank", n_transfers_pruned_by_rank_},
         {"n_journeys_found", n_journeys_found_},
         {"n_rounds", n_rounds_},
         {"max_transfers_reached", max_transfers_reached_},
@@ -65,6 +73,8 @@ struct query_stats {
   std::uint64_t n_segments_enqueued_{0U};
   std::uint64_t n_segments_pruned_{0U};
   std::uint64_t n_enqueue_prevented_by_reached_{0U};
+  std::uint64_t n_transfers_relaxed_{0U};
+  std::uint64_t n_transfers_pruned_by_rank_{0U};
   std::uint64_t n_journeys_found_{0U};
   std::uint64_t n_rounds_{0U};
   std::uint64_t max_pareto_set_size_{0U};
@@ -94,7 +104,9 @@ struct query_engine {
                bool,
                bool,
                bool,
-               transfer_time_settings);
+               bool,
+               transfer_time_settings,
+               profile_idx_t);
 
   algo_stats_t get_stats() const { return stats_; }
 
@@ -113,7 +125,6 @@ struct query_engine {
   void execute(unixtime_t const start_time,
                std::uint8_t const max_transfers,
                unixtime_t const worst_time_at_dest,
-               profile_idx_t const,
                pareto_set<journey>& results);
 
   void reconstruct(query const& q, journey& j) const;

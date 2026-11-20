@@ -1,7 +1,5 @@
 #include "nigiri/loader/init_finish.h"
 
-#include <execution>
-
 #include "utl/enumerate.h"
 
 #include "geo/box.h"
@@ -24,6 +22,7 @@ void register_special_stations(timetable& tt) {
                                    source_idx_t::invalid(),
                                    name,
                                    name_translation,
+                                   kEmptyTranslation,
                                    kEmptyTranslation,
                                    kEmptyTranslation,
                                    {0.0, 0.0},
@@ -134,22 +133,67 @@ float contrast_ratio(color_t a, color_t b) {
 void correct_color_contrast(timetable& tt) {
   for (auto& ids : tt.route_ids_) {
     for (auto& colors : ids.route_id_colors_) {
-      if (colors.color_ == 0 || colors.text_color_ == 0) {
-        continue;
+      constexpr auto white = color_t(0xFFFFFFFF);
+      constexpr auto black = color_t(0xFF000000);
+
+      if (colors.color_ != 0 && colors.text_color_ != 0) {
+        auto const ratio = contrast_ratio(colors.color_, colors.text_color_);
+
+        if (ratio < 2.0f) {
+          auto const better = contrast_ratio(colors.color_, black) >
+                                      contrast_ratio(colors.color_, white)
+                                  ? black
+                                  : white;
+          colors.text_color_ = better;
+        }
       }
 
-      auto const ratio = contrast_ratio(colors.color_, colors.text_color_);
+      if (colors.color_ == 0 && colors.text_color_ != 0) {
+        colors.color_ = contrast_ratio(colors.text_color_, black) >
+                                contrast_ratio(colors.text_color_, white)
+                            ? black
+                            : white;
+      }
 
-      if (ratio < 2.0f) {
-        constexpr auto white = color_t(0xFFFFFFFF);
-        constexpr auto black = color_t(0xFF000000);
-        auto const better = contrast_ratio(colors.color_, black) >
-                                    contrast_ratio(colors.color_, white)
-                                ? black
-                                : white;
-        colors.text_color_ = better;
+      if (colors.color_ != 0 && colors.text_color_ == 0) {
+        colors.text_color_ = contrast_ratio(colors.color_, black) >
+                                     contrast_ratio(colors.color_, white)
+                                 ? black
+                                 : white;
       }
     }
+  }
+}
+
+void rebuild_route_traffic_days(timetable& tt) {
+  tt.route_traffic_days_.resize(tt.n_routes());
+
+  for (auto r = route_idx_t{0U}; r != tt.n_routes(); ++r) {
+    auto combined = bitfield{};
+    auto const& seq = tt.route_location_seq_[r];
+    auto const stop_count = static_cast<stop_idx_t>(seq.size());
+
+    for (auto const t : tt.route_transport_ranges_[r]) {
+      auto max_delta = std::int16_t{0};
+      for (auto s = stop_idx_t{0U}; s != stop_count; ++s) {
+        if (s != 0U) {
+          max_delta = std::max(max_delta,
+                               tt.event_mam(r, t, s, event_type::kArr).days());
+        }
+        if (s + 1U != stop_count) {
+          max_delta = std::max(max_delta,
+                               tt.event_mam(r, t, s, event_type::kDep).days());
+        }
+      }
+
+      auto const& trans_bf = tt.bitfields_[tt.transport_traffic_days_[t]];
+      for (auto d = std::int16_t{0}; d <= max_delta; ++d) {
+        combined |= (trans_bf << static_cast<std::size_t>(d));
+      }
+    }
+
+    tt.bitfields_.emplace_back(combined);
+    tt.route_traffic_days_[r] = bitfield_idx_t{tt.bitfields_.size() - 1U};
   }
 }
 
@@ -158,32 +202,25 @@ void finalize(timetable& tt, finalize_options const opt) {
 
   {
     auto const timer = scoped_timer{"loader.sort_trip_ids"};
-    std::sort(
-#if __cpp_lib_execution
-        std::execution::par_unseq,
-#endif
-        begin(tt.trip_id_to_idx_), end(tt.trip_id_to_idx_),
-        [&](pair<trip_id_idx_t, trip_idx_t> const& a,
-            pair<trip_id_idx_t, trip_idx_t> const& b) {
-          return std::tuple{tt.trip_id_src_[a.first],
-                            tt.trip_id_strings_[a.first].view()} <
-                 std::tuple{tt.trip_id_src_[b.first],
-                            tt.trip_id_strings_[b.first].view()};
-        });
+    std::sort(begin(tt.trip_id_to_idx_), end(tt.trip_id_to_idx_),
+              [&](pair<trip_id_idx_t, trip_idx_t> const& a,
+                  pair<trip_id_idx_t, trip_idx_t> const& b) {
+                return std::tuple{tt.trip_id_src_[a.first],
+                                  tt.trip_id_strings_[a.first].view()} <
+                       std::tuple{tt.trip_id_src_[b.first],
+                                  tt.trip_id_strings_[b.first].view()};
+              });
   }
   {
     auto const timer = scoped_timer{"loader.sort_providers"};
-    std::sort(
-#if __cpp_lib_execution
-        std::execution::par_unseq,
-#endif
-        begin(tt.provider_id_to_idx_), end(tt.provider_id_to_idx_),
-        [&](provider_idx_t const a, provider_idx_t const b) {
-          return std::tie(tt.providers_[a].src_, tt.providers_[a].id_) <
-                 std::tie(tt.providers_[b].src_, tt.providers_[b].id_);
-        });
+    std::sort(begin(tt.provider_id_to_idx_), end(tt.provider_id_to_idx_),
+              [&](provider_idx_t const a, provider_idx_t const b) {
+                return std::tie(tt.providers_[a].src_, tt.providers_[a].id_) <
+                       std::tie(tt.providers_[b].src_, tt.providers_[b].id_);
+              });
   }
   build_footpaths(tt, opt);
+  rebuild_route_traffic_days(tt);
   build_lb_graph<direction::kForward>(tt, kDefaultProfile);
   build_lb_graph<direction::kBackward>(tt, kDefaultProfile);
   build_location_tree(tt);

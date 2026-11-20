@@ -1,5 +1,6 @@
 #include "nigiri/routing/tb/trex/bitfield_queue.h"
 
+#include "nigiri/routing/tb/trex/transfer_rank.h"
 #include "nigiri/timetable.h"
 
 namespace nigiri::routing::tb {
@@ -29,7 +30,7 @@ bool bitfield_queue::enqueue(timetable const& tt,
                              int const l) {
   auto const t = tbd.segment_transfers_[from_segment][transfer_idx];
 
-  if (tbd.transfer_rank_[from_segment][transfer_idx] < l) {
+  if (load_rank(tbd, from_segment, transfer_idx) < l) {
     return false;  // unimportant transfer
   }
 
@@ -45,7 +46,7 @@ bool bitfield_queue::enqueue(timetable const& tt,
       current.day_offset_ + t.get_day_offset());
 
   // beta' = (beta & t.beta) << t.sigma
-  auto beta_prime = tbd.bitfields_[current.days_] & tbd.bitfields_[t.traffic_days_];
+  auto beta_prime = interner[current.days_] & interner[t.traffic_days_];
   auto const shift = t.get_day_offset();
   beta_prime = shift < 0
                    ? (beta_prime >> static_cast<std::size_t>(-shift))

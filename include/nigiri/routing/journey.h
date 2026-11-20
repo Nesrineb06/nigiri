@@ -22,6 +22,7 @@ struct journey {
   CISTA_FRIEND_COMPARABLE(journey)
 
   struct run_enter_exit {
+    run_enter_exit() = default;
     run_enter_exit(rt::run r, stop_idx_t const a, stop_idx_t const b)
         : r_{std::move(r)},
           stop_range_{std::min(a, b),
@@ -40,6 +41,8 @@ struct journey {
   };
 
   struct leg {
+    leg() = default;
+
     template <typename T>
     leg(direction const d,
         location_idx_t const a,
@@ -109,6 +112,7 @@ struct journey {
   location_idx_t dest_{};
   std::uint8_t transfers_{0U};
   bool error_{false};
+  bool is_reconstructed_{false};
 };
 
 }  // namespace nigiri::routing

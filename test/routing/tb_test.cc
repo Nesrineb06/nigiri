@@ -12,6 +12,7 @@
 #include "nigiri/routing/tb/trex/bitfield_reached.h"
 #include "nigiri/routing/tb/trex/customize.h"
 #include "nigiri/routing/tb/trex/scan.h"
+#include "nigiri/routing/tb/trex/transfer_search.h"
 #include "nigiri/routing/tb/trex/trex_ibe.h"
 #include "nigiri/routing/tb/trex/trex_partition.h"
 
@@ -116,7 +117,6 @@ S2,S2,,,,,,
 # calendar.txt
 service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date
 MON,1,0,0,0,0,0,0,20210301,20210307
-THU,0,0,0,1,0,0,0,20210301,20210307
 
 # routes.txt
 route_id,agency_id,route_short_name,route_long_name,route_desc,route_type
@@ -126,17 +126,19 @@ R1,DTA,R1,R1,"S1 -> S2",2
 # trips.txt
 route_id,service_id,trip_id,trip_headsign,block_id
 R0,MON,R0_MON,R0_MON,1
-R1,THU,R1_THU,R1_THU,2
+R1,MON,R1_MON,R1_MON,2
 
 # stop_times.txt
 trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type
 R0_MON,00:00:00,00:00:00,S0,0,0,0
 R0_MON,12:00:00,12:00:00,S1,1,0,0
-R1_THU,06:00:00,06:00:00,S1,0,0,0
-R1_THU,07:00:00,07:00:00,S2,1,0,0
+R1_MON,06:00:00,06:00:00,S1,0,0,0
+R1_MON,07:00:00,07:00:00,S2,1,0,0
 )");
 }
 
+// R1 leaves 6h before R0 arrives and runs only on Mondays: the next
+// departure is 6.75 days later, beyond kTBMaxTransferTime.
 TEST(tb_preprocess, no_transfer) {
   auto const tt = load_gtfs(no_transfer_files);
   auto const tbd = tb::preprocess(tt, profile_idx_t{0});
@@ -558,7 +560,8 @@ TEST(tb_bitfield_queue, enqueue_shifts_day_bitfield_by_day_offset) {
   auto const c = partition.get_cell_id_of_stop(to_loc, 0);
 
   auto reached = tb::bitfield_reached{tt.n_routes()};
-  auto interner = tb::bitfield_interner{tbd};
+  auto const bf_index = tb::bitfield_index{tbd};
+  auto interner = tb::bitfield_interner{bf_index};
   auto q = tb::bitfield_queue{};
   q.q_.push_back(tb::bitfield_queue_entry{
       .segment_range_ = {from_segment, from_segment},
@@ -573,7 +576,7 @@ TEST(tb_bitfield_queue, enqueue_shifts_day_bitfield_by_day_offset) {
 
   ASSERT_TRUE(ok);
   ASSERT_EQ(2U, q.size());
-  EXPECT_EQ(bitfield{"1000000"}, tbd.bitfields_[q[1].days_]);
+  EXPECT_EQ(bitfield{"1000000"}, interner[q[1].days_]);
   EXPECT_EQ(std::int16_t{1}, q[1].day_offset_);
 }
 
@@ -597,9 +600,34 @@ TEST(tb_bitfield_reached, shrinks_candidate_to_non_overlapping_days) {
       r.update(route, reached_label(0, 0, stop_idx_t{0U}, bitfield{"1010"}));
 
   EXPECT_EQ(bitfield{"0010"}, result);
-  ASSERT_EQ(2U, r.data_[route].size());
-  EXPECT_EQ(bitfield{"1100"}, r.data_[route][0].days_);
-  EXPECT_EQ(bitfield{"0010"}, r.data_[route][1].days_);
+  ASSERT_EQ(1U, r.data_[route].size());
+  EXPECT_EQ(bitfield{"1110"}, r.data_[route][0].days_);
+}
+
+// The merge must not swallow days already covered by the key.
+TEST(tb_bitfield_reached, merges_equal_keys_without_losing_days) {
+  auto r = tb::bitfield_reached{1U};
+  auto const route = route_idx_t{0U};
+
+  r.update(route, reached_label(3, 4, stop_idx_t{5U}, bitfield{"1000"}));
+  r.update(route, reached_label(3, 4, stop_idx_t{5U}, bitfield{"0100"}));
+  r.update(route, reached_label(3, 4, stop_idx_t{5U}, bitfield{"0010"}));
+
+  ASSERT_EQ(1U, r.data_[route].size());
+  EXPECT_EQ(bitfield{"1110"}, r.data_[route][0].days_);
+
+  // every day already covered -> nothing survives, nothing is inserted
+  EXPECT_EQ(bitfield{"0000"},
+            r.update(route, reached_label(3, 4, stop_idx_t{5U},
+                                          bitfield{"1110"})));
+  EXPECT_EQ(1U, r.data_[route].size());
+
+  // a fresh day still gets through and joins the same entry
+  EXPECT_EQ(bitfield{"0001"},
+            r.update(route, reached_label(3, 4, stop_idx_t{5U},
+                                          bitfield{"1001"})));
+  ASSERT_EQ(1U, r.data_[route].size());
+  EXPECT_EQ(bitfield{"1111"}, r.data_[route][0].days_);
 }
 
 // Both dominated entries must be erased, including the one sliding into place.
@@ -1012,7 +1040,8 @@ TEST(tb_scan, truncates_at_first_segment_leaving_the_cell) {
   auto const c = std::uint64_t{1U};
 
   auto reached = tb::bitfield_reached{tt.n_routes()};
-  auto interner = tb::bitfield_interner{tbd};
+  auto const bf_index = tb::bitfield_index{tbd};
+  auto interner = tb::bitfield_interner{bf_index};
   auto q = tb::bitfield_queue{};
   q.q_.push_back(tb::bitfield_queue_entry{
       .segment_range_ = {seg0, seg1 + tb::segment_idx_t{1U}},
@@ -1031,8 +1060,8 @@ TEST(tb_scan, truncates_at_first_segment_leaving_the_cell) {
   EXPECT_EQ(seg1, q[0].segment_range_.to_);
 }
 
-bool interned(tb::tb_data const& tbd, bitfield const& bf) {
-  for (auto const& candidate : tbd.bitfields_) {
+bool interned(tb::bitfield_interner const& interner, bitfield const& bf) {
+  for (auto const& candidate : interner.local_) {
     if (candidate == bf) {
       return true;
     }
@@ -1040,7 +1069,7 @@ bool interned(tb::tb_data const& tbd, bitfield const& bf) {
   return false;
 }
 
-// End-to-end: the computed day bitfield must reach tbd.bitfields_ via the interner.
+// End-to-end: searching the IBE must intern the computed day bitfield.
 TEST(tb_customize, computes_expected_day_bitfield_end_to_end) {
   auto tt = load_gtfs(weekday_transfer_files);
   auto tbd = tb::preprocess(tt, profile_idx_t{0});
@@ -1067,11 +1096,44 @@ TEST(tb_customize, computes_expected_day_bitfield_end_to_end) {
   cell_ids[s2] = 3U;
   auto const partition = tb::trex_partition{1, std::move(cell_ids)};
 
-  ASSERT_FALSE(interned(tbd, expected));
+  auto const bf_index = tb::bitfield_index{tbd};
+  ASSERT_EQ(nullptr, bf_index.find(expected));
 
-  tb::customize(tt, tbd, partition);
+  auto seeker = tb::transfer_search{};
+  seeker.init(tt, tbd, partition, bf_index);
+  seeker.run(from_segment, 0);
 
-  EXPECT_TRUE(interned(tbd, expected));
+  EXPECT_TRUE(interned(seeker.interner_, expected));
+}
+
+// Same ranks no matter how the IBEs of a level are spread over threads.
+TEST(tb_customize, parallel_result_matches_sequential) {
+  auto tt = load_gtfs(two_independent_transfers_files);
+  auto sequential = tb::preprocess(tt, profile_idx_t{0});
+  auto parallel = tb::preprocess(tt, profile_idx_t{0});
+
+  auto const src = source_idx_t{0};
+  auto cell_ids = vector_map<location_idx_t, std::uint64_t>(
+      tt.n_locations(), std::uint64_t{0U});
+  auto cell = std::uint64_t{1U};
+  for (auto const* id : {"S0", "S1", "S2", "P0", "P1", "P2"}) {
+    cell_ids[tt.locations_.location_id_to_idx_.at({id, src})] = cell++;
+  }
+  auto const partition = tb::trex_partition{1, std::move(cell_ids)};
+
+  tb::customize(tt, sequential, partition, 1U);
+  tb::customize(tt, parallel, partition, 8U);
+
+  auto const n_segments = sequential.transfer_rank_.size();
+  ASSERT_EQ(n_segments, parallel.transfer_rank_.size());
+  for (auto s = decltype(n_segments){0U}; s != n_segments; ++s) {
+    auto const expected_ranks = sequential.transfer_rank_[tb::segment_idx_t{s}];
+    auto const actual_ranks = parallel.transfer_rank_[tb::segment_idx_t{s}];
+    ASSERT_EQ(expected_ranks.size(), actual_ranks.size());
+    for (auto i = std::size_t{0U}; i != expected_ranks.size(); ++i) {
+      EXPECT_EQ(expected_ranks[i], actual_ranks[i]);
+    }
+  }
 }
 
 mem_dir unnecessary_transfer_1_files() {

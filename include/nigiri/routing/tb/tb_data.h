@@ -60,6 +60,11 @@ struct tb_data {
     return {transport_first_segment_[t], transport_first_segment_[t + 1]};
   }
 
+  // True after customize() has written transfer ranks + the partition.
+  bool is_customized() const {
+    return n_levels_ != 0U && !cell_ids_.empty();
+  }
+
   void print(std::ostream&, timetable const&) const;
 
   profile_idx_t prf_idx_;
@@ -68,6 +73,9 @@ struct tb_data {
   vecvec<segment_idx_t, std::uint8_t> transfer_rank_;  // r(t)
   vector_map<segment_idx_t, transport_idx_t> segment_transports_;
   vector_map<tb_bitfield_idx_t, bitfield> bitfields_;
+
+  std::uint8_t n_levels_{0U};
+  vector_map<location_idx_t, std::uint64_t> cell_ids_;
 };
 
 }  // namespace nigiri::routing::tb

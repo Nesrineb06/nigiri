@@ -38,7 +38,9 @@ query_engine<UseLowerBounds>::query_engine(
     bool,
     bool,
     bool,
-    transfer_time_settings)
+    bool,
+    transfer_time_settings,
+    profile_idx_t)
     : tt_{tt},
       state_{state},
       is_dest_{is_dest},
@@ -51,6 +53,8 @@ query_engine<UseLowerBounds>::query_engine(
 
   auto const mark_dest_segments = [&](location_idx_t const l,
                                       duration_t const d) {
+    state_.lcl_.add_anchor(l);
+
     for (auto const r : tt_.location_routes_[l]) {
       auto const stop_seq = tt_.route_location_seq_[r];
       for (auto i = stop_idx_t{1U}; i != stop_seq.size(); ++i) {
@@ -97,7 +101,6 @@ template <bool UseLowerBounds>
 void query_engine<UseLowerBounds>::execute(unixtime_t const start_time,
                                            std::uint8_t const max_transfers,
                                            unixtime_t const worst_time_at_dest,
-                                           profile_idx_t const,
                                            pareto_set<journey>& results) {
   tb_queue_dbg("--- EXECUTE START_TIME={}", start_time);
 
@@ -198,29 +201,57 @@ template <bool UseLowerBounds>
 void query_engine<UseLowerBounds>::seg_transfers(queue_idx_t const q,
                                                  std::uint8_t const k) {
   auto const qe = state_.q_n_[q];
+  auto const& tbd = state_.tbd_;
+  auto const day = to_idx(base_ + qe.transport_query_day_offset_);
 
-  auto const from =
-      state_.tbd_.segment_transfers_[qe.segment_range_.from_].begin();
-  auto const to = state_.tbd_.segment_transfers_[qe.segment_range_.to_].begin();
-  for (auto it = from; it != to; ++it) {
-#ifndef _MSC_VER
-    if (it + 4 < to) {
-      __builtin_prefetch(&*(it + 4));
-    }
-#endif
-
-    auto const& transfer = *it;
-
-    tb_debug("[k={}] handling queue entry {}: #transfers={}", k, seg(s, qe),
-             state_.tbd_.segment_transfers_[s].size());
-    auto const day = to_idx(base_ + qe.transport_query_day_offset_);
-    if (state_.tbd_.bitfields_[transfer.traffic_days_].test(day)) {
-      tb_debug("  -> enqueue transfer to {}", seg(transfer.to_segment_, qe));
-      state_.q_n_.enqueue(transfer, q, k + 1, stats_.max_pareto_set_size_);
+  auto const relax = [&](transfer const& t) {
+    ++stats_.n_transfers_relaxed_;
+    if (tbd.bitfields_[t.traffic_days_].test(day)) {
+      tb_debug("  -> enqueue transfer to {}", seg(t.to_segment_, qe));
+      state_.q_n_.enqueue(t, q, k + 1, stats_.max_pareto_set_size_);
     } else {
-      tb_debug("  transfer {} - {} not active on {}", seg(s, qe),
-               seg(transfer.to_segment_, day_idx_t{day}),
+      tb_debug("  transfer to {} not active on {}", seg(t.to_segment_, qe),
                tt_.to_unixtime(day_idx_t{day}));
+    }
+  };
+
+  if (!state_.lcl_.enabled()) /* plain trip-based */ {
+    auto const from = tbd.segment_transfers_[qe.segment_range_.from_].begin();
+    auto const to = tbd.segment_transfers_[qe.segment_range_.to_].begin();
+    for (auto it = from; it != to; ++it) {
+#ifndef _MSC_VER
+      if (it + 4 < to) {
+        __builtin_prefetch(&*(it + 4));
+      }
+#endif
+      relax(*it);
+    }
+    return;
+  }
+
+  // T-REX: rank check keyed per segment (its arrival stop), not per transfer.
+  if (qe.segment_range_.from_ == qe.segment_range_.to_) {
+    return;
+  }
+  auto const t = tbd.segment_transports_[qe.segment_range_.from_];
+  auto const stop_seq = tt_.route_location_seq_[tt_.transport_route_[t]];
+  auto const first_segment = tbd.transport_first_segment_[t];
+  for (auto s = qe.segment_range_.from_; s != qe.segment_range_.to_; ++s) {
+    auto const dep_stop =
+        stop{stop_seq[to_idx(s - first_segment) + 1U]}.location_idx();
+    auto const min_rank = state_.lcl_.min_rank(dep_stop);
+
+    auto const transfers = tbd.segment_transfers_[s];
+    auto const ranks = tbd.transfer_rank_[s];
+    assert(transfers.size() == ranks.size());
+    for (auto i = std::size_t{0U}; i != transfers.size(); ++i) {
+      if (ranks[i] < min_rank) {
+        tb_debug("  transfer to {} pruned: rank {} < {}",
+                 seg(transfers[i].to_segment_, qe), ranks[i], min_rank);
+        ++stats_.n_transfers_pruned_by_rank_;
+        continue;
+      }
+      relax(transfers[i]);
     }
   }
 }
@@ -228,6 +259,8 @@ void query_engine<UseLowerBounds>::seg_transfers(queue_idx_t const q,
 template <bool UseLowerBounds>
 void query_engine<UseLowerBounds>::add_start(location_idx_t const l,
                                              unixtime_t const t) {
+  state_.lcl_.add_anchor(l);
+
   auto const [day, mam] = tt_.day_idx_mam(t);
   for (auto const r : tt_.location_routes_[l]) {
     // iterate stop sequence of route, skip last stop
@@ -240,7 +273,7 @@ void query_engine<UseLowerBounds>::add_start(location_idx_t const l,
 
       auto const et = get_earliest_transport<direction::kForward>(
           tt_, tt_, 0U, r, i, day, mam, stp.location_idx(),
-          [](day_idx_t, std::int16_t) { return false; });
+          [](day_idx_t, std::int16_t) { return false; }, kTBNDaysToIterate);
       if (!et.is_valid()) {
         continue;
       }
@@ -490,6 +523,8 @@ void query_engine<UseLowerBounds>::reconstruct(query const& q,
       }
     }
   }
+
+  j.is_reconstructed_ = true;
 }
 
 template <bool UseLowerBounds>
